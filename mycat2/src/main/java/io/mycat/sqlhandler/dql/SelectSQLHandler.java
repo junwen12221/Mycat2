@@ -12,19 +12,17 @@ import com.alibaba.fastsql.sql.optimizer.rules.TableSourceExtractor;
 import io.mycat.*;
 import io.mycat.beans.mycat.ResultSetBuilder;
 import io.mycat.booster.BoosterRuntime;
-import io.mycat.config.ServerConfiguration;
-import io.mycat.config.ShardingQueryRootConfig;
-import io.mycat.hbt4.DatasourceFactory;
+import io.mycat.hbt4.DataSourceFactory;
 import io.mycat.hbt4.DefaultDatasourceFactory;
 import io.mycat.hbt4.ResponseExecutorImplementor;
 import io.mycat.metadata.MetadataManager;
 import io.mycat.metadata.SchemaHandler;
 import io.mycat.replica.ReplicaSelectorRuntime;
-import io.mycat.sqlhandler.AbstractSQLHandler;
 import io.mycat.sqlhandler.ExecuteCode;
 import io.mycat.sqlhandler.SQLRequest;
 import io.mycat.sqlhandler.ShardingSQLHandler;
 import io.mycat.sqlhandler.dml.DrdsRunners;
+import io.mycat.util.NameMap;
 import io.mycat.util.Response;
 import lombok.Getter;
 import lombok.SneakyThrows;
@@ -139,7 +137,7 @@ public class SelectSQLHandler extends ShardingSQLHandler {
         ///////////////////////////////common///////////////////////////////
         MetadataManager metadataManager = MetaClusterCurrent.wrapper(MetadataManager.class);
         ReplicaSelectorRuntime replicaSelectorRuntime = MetaClusterCurrent.wrapper(ReplicaSelectorRuntime.class);
-        Map<String, SchemaHandler> schemaMap = metadataManager.getSchemaMap();
+        NameMap<SchemaHandler> schemaMap = metadataManager.getSchemaMap();
         String schemaName = Optional.ofNullable(collector.getSchema()).orElse(dataContext.getDefaultSchema());
         if (schemaName == null) {
             receiver.sendError(new MycatException("schema is null"));
@@ -174,7 +172,7 @@ public class SelectSQLHandler extends ShardingSQLHandler {
             receiver.proxySelect(schemaHandler.defaultTargetName(), statement.toString());
             return;
         }
-        try (DatasourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext);
+        try (DataSourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext);
         ) {
             ResponseExecutorImplementor responseExecutorImplementor = ResponseExecutorImplementor.create(dataContext, receiver, datasourceFactory);
             DrdsRunners.runOnDrds(dataContext, request.getAst(),responseExecutorImplementor );
@@ -190,7 +188,7 @@ public class SelectSQLHandler extends ShardingSQLHandler {
         return prototype.orElseGet(selectorRuntime::getDatasourceNameByRandom);
     }
 
-    private TableHandler chooseTableHandler(Map<String, TableHandler> tableMap, Set<String> tables) {
+    private TableHandler chooseTableHandler(NameMap<TableHandler> tableMap, Set<String> tables) {
         for (String table : tables) {
             TableHandler tableHandler = tableMap.get(table);
             if (tableHandler != null) {

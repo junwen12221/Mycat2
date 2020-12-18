@@ -9,11 +9,13 @@ import io.mycat.plug.loadBalance.LoadBalanceManager;
 import io.mycat.plug.sequence.SequenceGenerator;
 import io.mycat.proxy.session.AuthenticatorImpl;
 import io.mycat.replica.ReplicaSelectorRuntime;
+import io.mycat.router.gsi.GSIService;
+import io.mycat.router.gsi.impl.MapDBGSIService;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
 public class ConfigPrepareExecuter {
@@ -27,7 +29,9 @@ public class ConfigPrepareExecuter {
     private MetadataStorageManager metadataStorageManager;
     private SequenceGenerator sequenceGenerator;
 
+
     private String datasourceProvider;
+    private SqlResultSetService sqlResultSetService;
 //    UpdateType updateType = UpdateType.FULL;
 
 
@@ -66,7 +70,7 @@ public class ConfigPrepareExecuter {
                 LoadBalanceManager loadBalanceManager = MetaClusterCurrent.wrapper(LoadBalanceManager.class);
                 MycatWorkerProcessor mycatWorkerProcessor = MetaClusterCurrent.wrapper(MycatWorkerProcessor.class);
 
-                this.authenticator = new AuthenticatorImpl(ops.getUsers().stream().collect(Collectors.toMap(k -> k.getUsername(), v -> v)));
+                this.authenticator = new AuthenticatorImpl(ops.getUsers().stream().distinct().collect(Collectors.toMap(k -> k.getUsername(), v -> v)));
                 break;
             }
             case SEQUENCE: {
@@ -78,6 +82,7 @@ public class ConfigPrepareExecuter {
             }
             case ROUTER: {
                 this.metadataManager = createMetaData();
+                clearSqlCache();
                 break;
             }
             case CREATE_TABLE: {
@@ -86,6 +91,7 @@ public class ConfigPrepareExecuter {
                 this.metadataManager = createMetaData();
                 TableHandler table = this.metadataManager.getTable(schemaName, tableName);
                 table.createPhysicalTables();
+                clearSqlCache();
                 break;
             }
             case DROP_TABLE: {
@@ -99,18 +105,38 @@ public class ConfigPrepareExecuter {
                 if (table != null) {
                     table.dropPhysicalTables();
                 }
+                clearSqlCache();
                 break;
             }
             case FULL: {
                 MycatRouterConfig mycatRouterConfig = ops.getMycatRouterConfig();
-                initBy(mycatRouterConfig);
+                fullInitBy(mycatRouterConfig);
+                clearSqlCache();
                 break;
             }
 
+            case CREATE_SQL_CACHE: {
+                if (MetaClusterCurrent.exist(SqlResultSetService.class)) {
+                    SqlResultSetService sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+                    if (sqlResultSetService != null) {
+                        sqlResultSetService.addIfNotPresent(ops.sqlCache);
+                    }
+                }
+                break;
+            }
+            case DROP_SQL_CACHE: {
+                if (MetaClusterCurrent.exist(SqlResultSetService.class)) {
+                    SqlResultSetService sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+                    if (sqlResultSetService != null) {
+                        sqlResultSetService.dropByName(ops.sqlCache.getName());
+                    }
+                }
+                break;
+            }
             case RESET:
                 MycatRouterConfig routerConfig = new MycatRouterConfig();
                 FileMetadataStorageManager.defaultConfig(routerConfig);
-                initBy(routerConfig);
+                fullInitBy(routerConfig);
                 break;
         }
     }
@@ -125,7 +151,7 @@ public class ConfigPrepareExecuter {
                 "prototype");
     }
 
-    public void initBy(MycatRouterConfig mycatRouterConfig) {
+    public void fullInitBy(MycatRouterConfig mycatRouterConfig) {
         if (MetaClusterCurrent.exist(ReplicaSelectorRuntime.class)) {
             ReplicaSelectorRuntime replicaSelectorRuntime = MetaClusterCurrent.wrapper(ReplicaSelectorRuntime.class);
             replicaSelectorRuntime.close();
@@ -146,6 +172,25 @@ public class ConfigPrepareExecuter {
         this.sequenceGenerator = new SequenceGenerator(serverConfig.getMycatId(), mycatRouterConfig.getSequences());
         this.authenticator = new AuthenticatorImpl(mycatRouterConfig.getUsers().stream().collect(Collectors.toMap(k -> k.getUsername(), v -> v)));
         this.metadataManager = new MetadataManager(mycatRouterConfig.getSchemas(), loadBalanceManager, sequenceGenerator, replicaSelector, jdbcConnectionManager, mycatRouterConfig.getPrototype());
+
+        if (MetaClusterCurrent.exist(SqlResultSetService.class)) {
+            SqlResultSetService sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+            sqlResultSetService.close();
+        }
+        this.sqlResultSetService = new SqlResultSetService();
+        for (SqlCacheConfig sqlCacheConfig : mycatRouterConfig.getSqlCacheConfigs()) {
+            this.sqlResultSetService.addIfNotPresent(sqlCacheConfig);
+        }
+
+    }
+
+    private void clearSqlCache() {
+        if (MetaClusterCurrent.exist(SqlResultSetService.class)) {
+            this.sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+            if (sqlResultSetService != null) {
+                sqlResultSetService.clear();
+            }
+        }
     }
 
     public void prepareStoreDDL() {
@@ -190,6 +235,7 @@ public class ConfigPrepareExecuter {
         Authenticator authenticator = this.authenticator;
         MetadataStorageManager metadataStorageManager = this.metadataStorageManager;
         SequenceGenerator sequenceGenerator = this.sequenceGenerator;
+        SqlResultSetService sqlResultSetService = this.sqlResultSetService;
         MycatRouterConfig mycatRouterConfig = ops.getMycatRouterConfig();
 
         HashMap<Class, Object> context = new HashMap<>();
@@ -225,11 +271,14 @@ public class ConfigPrepareExecuter {
         if (sequenceGenerator != null) {
             context.put(sequenceGenerator.getClass(), sequenceGenerator);
         }
-        if (mycatRouterConfig!=null){
+        if (mycatRouterConfig != null) {
             context.put(MycatRouterConfig.class, mycatRouterConfig);
         }
+        if (sqlResultSetService !=null){
+            context.put(SqlResultSetService.class, sqlResultSetService);
+        }
         PlanCache.INSTANCE.clear();
-        context.put(DrdsRunner.class, new DrdsRunner(() ->((MetadataManager)context.get(MetadataManager.class)).getSchemaMap(), PlanCache.INSTANCE));
+        context.put(DrdsRunner.class, new DrdsRunner(() -> ((MetadataManager) context.get(MetadataManager.class)).getSchemaMap(), PlanCache.INSTANCE));
         MetaClusterCurrent.register(context);
     }
 }

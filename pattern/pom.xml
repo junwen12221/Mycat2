@@ -5,7 +5,7 @@
     <parent>
         <artifactId>parent</artifactId>
         <groupId>io.mycat</groupId>
-        <version>1.12-SNAPSHOT</version>
+        <version>1.13-alpha</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -15,18 +15,13 @@
         <dependency>
             <groupId>io.mycat</groupId>
             <artifactId>common</artifactId>
-            <version>1.12-SNAPSHOT</version>
+            <version>1.13-alpha</version>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>1.18.10</version>
             <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-            <version>1.7.9</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/com.alibaba.fastsql/fastsql -->
         <dependency>
@@ -50,12 +45,12 @@
         <dependency>
             <groupId>io.mycat</groupId>
             <artifactId>config</artifactId>
-            <version>1.12-SNAPSHOT</version>
+            <version>1.13-alpha</version>
         </dependency>
         <dependency>
             <groupId>io.mycat</groupId>
             <artifactId>hbt</artifactId>
-            <version>1.12-SNAPSHOT</version>
+            <version>1.13-alpha</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/org.openjdk.jmh/jmh-core -->
         <dependency>

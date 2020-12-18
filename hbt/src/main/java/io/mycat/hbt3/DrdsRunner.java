@@ -46,9 +46,11 @@ import io.mycat.hbt4.*;
 import io.mycat.hbt4.executor.MycatPreparedStatementUtil;
 import io.mycat.hbt4.logical.rel.MycatInsertRel;
 import io.mycat.hbt4.logical.rel.MycatUpdateRel;
+import io.mycat.hbt4.logical.rules.MycatViewToIndexViewRule;
 import io.mycat.metadata.*;
 import io.mycat.router.CustomRuleFunction;
 import io.mycat.router.ShardingTableHandler;
+import io.mycat.router.gsi.GSIService;
 import lombok.SneakyThrows;
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.plan.*;
@@ -58,11 +60,11 @@ import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.rel.*;
 import org.apache.calcite.rel.core.Filter;
-import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.TableModify;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.externalize.RelWriterImpl;
 import org.apache.calcite.rel.logical.LogicalJoin;
+import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalTableModify;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.rules.CoreRules;
@@ -147,7 +149,7 @@ public class DrdsRunner {
                 return super.visit(scan);
             }
         });
-        return optimizeWithCBO(relNode);
+        return optimizeWithCBO(relNode, Collections.emptyList());
     }
 
     public Iterable<DrdsSql> preParse(String stmtList, List<Object> inputParameters) {
@@ -324,7 +326,7 @@ public class DrdsRunner {
     private MycatRel complieGlobalUpdate(OptimizationContext optimizationContext, DrdsSql drdsSql, SQLStatement sqlStatement, GlobalTableHandler logicTable) {
         GlobalTableHandler globalTableHandler = logicTable;
         Distribution distribution = Distribution.of(globalTableHandler.getGlobalDataNode(), false, Distribution.Type.BroadCast);
-        MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(distribution, sqlStatement);
+        MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(distribution, sqlStatement,true);
         optimizationContext.saveAlways(drdsSql.getParameterizedString(), mycatUpdateRel);
         return mycatUpdateRel;
     }
@@ -333,7 +335,7 @@ public class DrdsRunner {
     private MycatRel complieNormalUpdate(OptimizationContext optimizationContext, DrdsSql drdsSql, SQLStatement sqlStatement, NormalTableHandler logicTable) {
         NormalTableHandler normalTableHandler = logicTable;
         Distribution distribution = Distribution.of(ImmutableList.of(normalTableHandler.getDataNode()), false, Distribution.Type.PHY);
-        MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(distribution, sqlStatement);
+        MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(distribution, sqlStatement,false);
         optimizationContext.saveAlways(drdsSql.getParameterizedString(), mycatUpdateRel);
         return mycatUpdateRel;
     }
@@ -435,8 +437,19 @@ public class DrdsRunner {
             }
         }
         RelNode rboLogPlan = optimizeWithRBO(logPlan, drdsSql, optimizationContext);
-        MycatRel cboLogPlan = optimizeWithCBO(rboLogPlan);
-        if (!optimizationContext.predicateOnPhyView && !optimizationContext.predicateOnView) {
+        Collection<RelOptRule> rboInCbo;
+        if (MetaClusterCurrent.exist(GSIService.class)) {
+            rboInCbo = Collections.singletonList(
+                    new MycatViewToIndexViewRule(optimizationContext, drdsSql.getParams())
+            );
+        }else {
+            rboInCbo = Collections.emptyList();
+        }
+        MycatRel cboLogPlan = optimizeWithCBO(rboLogPlan, rboInCbo);
+        List<Object> params = drdsSql.getParams();
+        if (params.isEmpty()){
+            optimizationContext.saveAlways(drdsSql.getParameterizedString(), cboLogPlan);
+        }else if (!optimizationContext.predicateOnPhyView && !optimizationContext.predicateOnView) {
             //全表扫描
             optimizationContext.saveAlways(drdsSql.getParameterizedString(), cboLogPlan);
         } else if (!optimizationContext.predicateOnPhyView && optimizationContext.predicateOnView) {
@@ -565,13 +578,16 @@ public class DrdsRunner {
     private MycatRel planUpdate(LogicalTableModify tableModify,
                                 DrdsSql drdsSql, OptimizationContext optimizationContext) {
         RelNode input = tableModify.getInput();
+        if (input instanceof LogicalProject) {
+            input = ((LogicalProject) input).getInput();
+        }
         if (input instanceof Filter && ((Filter) input).getInput() instanceof LogicalTableScan) {
             AbstractMycatTable mycatTable = tableModify.getTable().unwrap(AbstractMycatTable.class);
             RexNode condition = ((Filter) input).getCondition();
             Distribution distribution = mycatTable.computeDataNode(ImmutableList.of(condition));
             MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(tableModify.getCluster(),
                     distribution,
-                    drdsSql.getSqlStatement());
+                    drdsSql.getSqlStatement(),mycatTable.isBroadCast());
             optimizationContext.saveParameterized(drdsSql.getParameterizedString(), mycatUpdateRel);
             return mycatUpdateRel;
         }
@@ -579,7 +595,7 @@ public class DrdsRunner {
         Distribution distribution = mycatTable.computeDataNode();
         MycatUpdateRel mycatUpdateRel = new MycatUpdateRel(tableModify.getCluster(),
                 distribution,
-                drdsSql.getSqlStatement());
+                drdsSql.getSqlStatement(),mycatTable.isBroadCast());
         optimizationContext.saveAlways(drdsSql.getParameterizedString(), mycatUpdateRel);
         return mycatUpdateRel;
     }
@@ -617,7 +633,7 @@ public class DrdsRunner {
         }
     }
 
-    public static MycatRel optimizeWithCBO(RelNode logPlan) {
+    public MycatRel optimizeWithCBO(RelNode logPlan, Collection<RelOptRule> relOptRules) {
         if (logPlan instanceof MycatRel) {
             return (MycatRel) logPlan;
         } else {
@@ -625,6 +641,12 @@ public class DrdsRunner {
             RelOptPlanner planner = cluster.getPlanner();
             planner.clear();
             MycatConvention.INSTANCE.register(planner);
+
+            if (relOptRules != null) {
+                for (RelOptRule relOptRule : relOptRules) {
+                    planner.addRule(relOptRule);
+                }
+            }
             logPlan = planner.changeTraits(logPlan, cluster.traitSetOf(MycatConvention.INSTANCE));
             planner.setRoot(logPlan);
             return (MycatRel) planner.findBestExp();
@@ -692,7 +714,7 @@ public class DrdsRunner {
         HepPlanner planner = new HepPlanner(builder.build());
         planner.setRoot(logPlan);
         RelNode bestExp = planner.findBestExp();
-        RelNode accept = bestExp.accept(new SQLRBORewriter(optimizationContext));
+        RelNode accept = bestExp.accept(new SQLRBORewriter(optimizationContext, drdsSql.getParams()));
         return accept;
     }
 

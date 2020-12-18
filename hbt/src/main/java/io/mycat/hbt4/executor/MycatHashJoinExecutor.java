@@ -17,10 +17,11 @@ package io.mycat.hbt4.executor;
 import com.google.common.collect.ImmutableList;
 import io.mycat.calcite.MycatCalciteSupport;
 import io.mycat.hbt4.Executor;
-import org.apache.calcite.MycatContext;
+import io.mycat.hbt4.ExplainWriter;
 import io.mycat.hbt4.MycatRexCompiler;
 import io.mycat.mpp.Row;
 import lombok.SneakyThrows;
+import org.apache.calcite.MycatContext;
 import org.apache.calcite.linq4j.Enumerable;
 import org.apache.calcite.linq4j.EnumerableDefaults;
 import org.apache.calcite.linq4j.Linq4j;
@@ -32,7 +33,8 @@ import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
-import org.objenesis.instantiator.util.UnsafeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Iterator;
 import java.util.List;
@@ -54,6 +56,7 @@ public class MycatHashJoinExecutor implements Executor {
     private List<Object> params;
     private Enumerable<Row> rows;
     private Iterator<Row> iterator;
+    private static final Logger LOGGER = LoggerFactory.getLogger(MycatHashJoinExecutor.class);
 
     public MycatHashJoinExecutor(JoinRelType joinType,
                                  Executor outer,
@@ -78,6 +81,10 @@ public class MycatHashJoinExecutor implements Executor {
         this.rightFieldCount = rightFieldCount;
         this.resultRelDataType = resultRelDataType;
         this.params = params;
+
+        if(LOGGER.isDebugEnabled()){
+            LOGGER.debug("create MycatMergeJoinExecutor ");
+        }
     }
 
     public MycatHashJoinExecutor create(
@@ -116,7 +123,7 @@ public class MycatHashJoinExecutor implements Executor {
         if (rows == null) {
             originOuter.open();
             originInner.open();
-            MycatContext o = (MycatContext) UnsafeUtils.getUnsafe().allocateInstance(MycatContext.class);
+            MycatContext o = new MycatContext();
 ////////////////////////////////////check////////////////////////////////////////////////
 //            if (!outer.isRewindSupported()) {
 //                outer = tempResultSetFactory.makeRewind(outer);
@@ -210,4 +217,13 @@ public class MycatHashJoinExecutor implements Executor {
     }
 
 
+    @Override
+    public ExplainWriter explain(ExplainWriter writer) {
+        ExplainWriter explainWriter = writer.name(this.getClass().getName())
+                .into();
+        writer.item("joinType",joinType);
+        originOuter.explain(writer);
+        originInner.explain(writer);
+        return explainWriter.ret();
+    }
 }

@@ -10,9 +10,8 @@ import com.alibaba.fastsql.sql.ast.SQLStatement;
 import com.alibaba.fastsql.sql.ast.expr.SQLBinaryOpExpr;
 import com.alibaba.fastsql.sql.ast.expr.SQLValuableExpr;
 import com.alibaba.fastsql.sql.ast.statement.*;
+import io.mycat.DataNode;
 import io.mycat.router.gsi.GSIService;
-import io.mycat.util.ClassUtil;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -255,6 +254,42 @@ public class MapDBGSIService implements GSIService {
             }
         }
         return rowDataList;
+    }
+
+    @Override
+    public Optional<Iterable<Object[]>> scanProject(String schemaName, String tableName, int[] projects) {
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<Iterable<Object[]>> scan(String schemaName, String tableName) {
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<Iterable<Object[]>> scanProjectFilter(String schemaName, String tableName, int index, Object value) {
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<Iterable<Object[]>> scanProjectFilter(String schemaName, String tableName, int[] projects, int[] filterIndexes, Object[] values) {
+        return Optional.empty();
+    }
+
+
+    @Override
+    public Optional<DataNode> queryDataNode(String schemaName, String tableName, int index, Object value) {
+        return Optional.empty();
+    }
+
+    @Override
+    public boolean isIndexTable(String schemaName, String tableName) {
+        return false;
+    }
+
+    @Override
+    public void insert(String txId, String schemaName, String tableName, int[] columnNames, List<Object> objects) {
+
     }
 
     private List<IndexRowData> handleBinaryOpExpr(String tableName,SQLBinaryOpExpr where){

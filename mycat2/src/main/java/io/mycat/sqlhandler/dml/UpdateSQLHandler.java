@@ -5,18 +5,14 @@ import com.alibaba.fastsql.sql.ast.SQLStatement;
 import com.alibaba.fastsql.sql.ast.statement.SQLExprTableSource;
 import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlUpdateStatement;
 import io.mycat.*;
-import io.mycat.hbt3.DrdsConfig;
-import io.mycat.hbt3.DrdsConst;
-import io.mycat.hbt3.DrdsRunner;
-import io.mycat.hbt3.DrdsSql;
 import io.mycat.hbt4.*;
 import io.mycat.hbt4.executor.TempResultSetFactory;
 import io.mycat.hbt4.executor.TempResultSetFactoryImpl;
 import io.mycat.metadata.MetadataManager;
 import io.mycat.metadata.SchemaHandler;
 import io.mycat.sqlhandler.AbstractSQLHandler;
-import io.mycat.sqlhandler.ExecuteCode;
 import io.mycat.sqlhandler.SQLRequest;
+import io.mycat.util.NameMap;
 import io.mycat.util.Response;
 import lombok.SneakyThrows;
 
@@ -36,7 +32,7 @@ public class UpdateSQLHandler extends AbstractSQLHandler<MySqlUpdateStatement> {
         String tableName = SQLUtils.normalize(tableSource.getTableName());
         SchemaHandler schemaHandler;
         MetadataManager metadataManager = MetaClusterCurrent.wrapper(MetadataManager.class);
-        Optional<Map<String, SchemaHandler>> handlerMapOptional = Optional.ofNullable(metadataManager.getSchemaMap());
+        Optional<NameMap<SchemaHandler>> handlerMapOptional = Optional.ofNullable(metadataManager.getSchemaMap());
         Optional<String> targetNameOptional = Optional.ofNullable(metadataManager.getPrototype());
         if (!handlerMapOptional.isPresent()) {
             if (targetNameOptional.isPresent()) {
@@ -47,7 +43,7 @@ public class UpdateSQLHandler extends AbstractSQLHandler<MySqlUpdateStatement> {
                 return;
             }
         } else {
-            Map<String, SchemaHandler> handlerMap = handlerMapOptional.get();
+            NameMap< SchemaHandler> handlerMap = handlerMapOptional.get();
             schemaHandler = Optional.ofNullable(handlerMap.get(schemaName))
                     .orElseGet(() -> {
                         if (dataContext.getDefaultSchema() == null) {
@@ -61,7 +57,7 @@ public class UpdateSQLHandler extends AbstractSQLHandler<MySqlUpdateStatement> {
             }
         }
         String defaultTargetName = schemaHandler.defaultTargetName();
-        Map<String, TableHandler> tableMap = schemaHandler.logicTables();
+        NameMap< TableHandler> tableMap = schemaHandler.logicTables();
         TableHandler tableHandler = tableMap.get(tableName);
         ///////////////////////////////common///////////////////////////////
         if (tableHandler == null) {
@@ -69,7 +65,7 @@ public class UpdateSQLHandler extends AbstractSQLHandler<MySqlUpdateStatement> {
             return;
         }
         TempResultSetFactory tempResultSetFactory = new TempResultSetFactoryImpl();
-        try (DatasourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext)) {
+        try (DataSourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext)) {
             DrdsRunners.runOnDrds(dataContext, sqlStatement, new ResponseExecutorImplementor(datasourceFactory, tempResultSetFactory, receiver));
         }
     }

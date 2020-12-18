@@ -25,10 +25,10 @@ import io.mycat.hbt4.logical.rel.MycatUpdateRel;
 import io.mycat.metadata.QueryBuilder;
 
 public abstract class ExecutorImplementorImpl extends BaseExecutorImplementor {
-    protected final DatasourceFactory factory;
+    protected final DataSourceFactory factory;
 
 
-    public ExecutorImplementorImpl(DatasourceFactory factory,
+    public ExecutorImplementorImpl(DataSourceFactory factory,
                                    TempResultSetFactory tempResultSetFactory) {
         super(tempResultSetFactory);
         this.factory = factory;
@@ -59,6 +59,11 @@ public abstract class ExecutorImplementorImpl extends BaseExecutorImplementor {
 
     @Override
     public Executor implement(MycatUpdateRel mycatUpdateRel) {
+        if (mycatUpdateRel.isGlobal()){
+            return new MycatGlobalUpdateExecutor(mycatUpdateRel.getValues(),
+                    mycatUpdateRel.getSqlStatement(),
+                    params,factory);
+        }
         return MycatUpdateExecutor.create(mycatUpdateRel.getValues(),
                 mycatUpdateRel.getSqlStatement(),
                 factory,

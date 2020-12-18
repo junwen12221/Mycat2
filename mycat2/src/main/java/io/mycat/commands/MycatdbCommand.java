@@ -1,14 +1,19 @@
 package io.mycat.commands;
 
 import com.alibaba.fastsql.DbType;
+import com.alibaba.fastsql.sql.SQLUtils;
 import com.alibaba.fastsql.sql.ast.SQLStatement;
+import com.alibaba.fastsql.sql.ast.statement.SQLSelectStatement;
 import com.alibaba.fastsql.sql.ast.statement.SQLStartTransactionStatement;
 import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlExplainStatement;
+import com.alibaba.fastsql.sql.parser.ParserException;
 import com.alibaba.fastsql.sql.parser.SQLParserUtils;
 import com.alibaba.fastsql.sql.parser.SQLStatementParser;
+import com.alibaba.fastsql.sql.parser.SQLType;
+import com.alibaba.fastsql.sql.visitor.SQLASTOutputVisitor;
 import com.google.common.collect.ImmutableClassToInstanceMap;
-import io.mycat.MycatDataContext;
-import io.mycat.ReceiverImpl;
+import io.mycat.*;
+import io.mycat.api.collector.RowBaseIterator;
 import io.mycat.hbt4.DefaultDatasourceFactory;
 import io.mycat.hbt4.ExecutorImplementor;
 import io.mycat.hbt4.ResponseExecutorImplementor;
@@ -26,14 +31,13 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * @author Junwen Chen
  **/
 public enum MycatdbCommand {
+    /**/
     INSTANCE;
     final static Logger logger = LoggerFactory.getLogger(MycatdbCommand.class);
     static final ImmutableClassToInstanceMap<SQLHandler> sqlHandlerMap;
@@ -93,6 +97,7 @@ public enum MycatdbCommand {
             sqlHandlers.add(new ShowCreateFunctionHanlder());
             sqlHandlers.add(new CreateTableSQLHandler());
             sqlHandlers.add(new CreateSequenceHandler());
+            sqlHandlers.add(new DropSequenceSQLHandler());
             //Analyze
             sqlHandlers.add(new AnalyzeHanlder());
 
@@ -114,12 +119,10 @@ public enum MycatdbCommand {
 
     public void executeQuery(String text, MycatSession session, MycatDataContext dataContext) {
         try {
-            if (isHbt(text)) {
-                executeHbt(dataContext, text.substring(12), new ReceiverImpl(session, 1, false, false));
-                return;
+            if (logger.isDebugEnabled()) {
+                logger.debug(text);
             }
-            logger.info(text);
-            LinkedList<SQLStatement> statements = parse(text);
+            LinkedList<SQLStatement> statements = parse(text, dataContext);
             Response receiver;
             if (statements.size() == 1 && statements.get(0) instanceof MySqlExplainStatement) {
                 receiver = new ReceiverImpl(session, statements.size(), false, false);
@@ -130,6 +133,10 @@ public enum MycatdbCommand {
                 execute(dataContext, receiver, sqlStatement);
             }
         } catch (Throwable e) {
+            if (isNavicatClientStatusQuery(text)) {
+                session.writeOkEndPacket();
+                return;
+            }
             session.setLastMessage(e);
             session.writeErrorEndPacketBySyncInProcessError();
             return;
@@ -137,13 +144,36 @@ public enum MycatdbCommand {
 
     }
 
+    private static boolean isNavicatClientStatusQuery(String text) {
+        if (Objects.equals(
+                "SELECT STATE AS `状态`, ROUND(SUM(DURATION),7) AS `期间`, CONCAT(ROUND(SUM(DURATION)/*100,3), '%') AS `百分比` FROM INFORMATION_SCHEMA.PROFILING WHERE QUERY_ID= GROUP BY STATE ORDER BY SEQ",
+                text)) {
+            return true;
+        }
+        return false;
+    }
+
     public static void execute(MycatDataContext dataContext, Response receiver, SQLStatement sqlStatement) throws Exception {
+        boolean existSqlResultSetService = MetaClusterCurrent.exist(SqlResultSetService.class);
+
+        //////////////////////////////////apply transaction///////////////////////////////////
+        TransactionSession transactionSession = dataContext.getTransactionSession();
+        transactionSession.doAction();
+        //////////////////////////////////////////////////////////////////////////////////////
+        if (existSqlResultSetService && !transactionSession.isInTransaction() && sqlStatement instanceof SQLSelectStatement) {
+            SqlResultSetService sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+            Optional<RowBaseIterator> baseIteratorOptional = sqlResultSetService.get((SQLSelectStatement) sqlStatement);
+            if (baseIteratorOptional.isPresent()) {
+                receiver.sendResultSet(baseIteratorOptional.get());
+                return;
+            }
+        }
         SQLRequest<SQLStatement> request = new SQLRequest<>(sqlStatement);
         Class aClass = sqlStatement.getClass();
-        SQLHandler instance =   sqlHandlerMap.getInstance(aClass);
-        if (instance!=null) {
+        SQLHandler instance = sqlHandlerMap.getInstance(aClass);
+        if (instance != null) {
             instance.execute(request, dataContext, receiver);
-        }else {
+        } else {
             receiver.tryBroadcastShow(sqlStatement.toString());
         }
     }
@@ -159,7 +189,7 @@ public enum MycatdbCommand {
 
     @SneakyThrows
     private static void executeHbt(MycatDataContext dataContext, String substring, Response receiver) {
-        try(DefaultDatasourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext)) {
+        try (DefaultDatasourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext)) {
             TempResultSetFactoryImpl tempResultSetFactory = new TempResultSetFactoryImpl();
             ExecutorImplementor executorImplementor = new ResponseExecutorImplementor(datasourceFactory, tempResultSetFactory, receiver);
             DrdsRunners.runHbtOnDrds(dataContext, substring, executorImplementor);
@@ -167,16 +197,37 @@ public enum MycatdbCommand {
     }
 
     @NotNull
-    private static LinkedList<SQLStatement> parse(String text) {
+    private LinkedList<SQLStatement> parse(String text, MycatDataContext dataContext) {
         text = text.trim();
+        LinkedList<SQLStatement> resStatementList = new LinkedList<>();
         if (text.startsWith("begin") || text.startsWith("BEGIN")) {
             SQLStartTransactionStatement sqlStartTransactionStatement = new SQLStartTransactionStatement();
-            LinkedList<SQLStatement> sqlStatements = new LinkedList<>();
-            sqlStatements.add(sqlStartTransactionStatement);
-            return sqlStatements;
+            resStatementList.add(sqlStartTransactionStatement);
+            text = text.substring(0, "begin".length());
+            text = text.trim();
+            if (text.startsWith(";")) {
+                text = text.substring(1);
+            }
         }
+        MycatUser user = dataContext.getUser();
+        return parseMySQLString(text, resStatementList);
+    }
+
+    @NotNull
+    private String convertSql(String text,DbType type) {
+        SQLStatementParser parser = SQLParserUtils.createSQLStatementParser(text, type, true);
+        List<SQLStatement> sqlStatements = parser.parseStatementList();
+        StringBuilder out = new StringBuilder();
+        SQLASTOutputVisitor outputVisitor = SQLUtils.createOutputVisitor(out, type);
+        for (SQLStatement sqlStatement : sqlStatements) {
+            sqlStatement.accept(outputVisitor);
+        }
+        return out.toString();
+    }
+
+
+    private LinkedList<SQLStatement> parseMySQLString(String text, LinkedList<SQLStatement> statementList) {
         SQLStatementParser parser = SQLParserUtils.createSQLStatementParser(text, DbType.mysql, true);
-        LinkedList<SQLStatement> statementList = new LinkedList<SQLStatement>();
         parser.parseStatementList(statementList, -1, null);
         return statementList;
     }

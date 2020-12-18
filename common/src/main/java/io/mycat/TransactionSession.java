@@ -46,13 +46,7 @@ public interface TransactionSession extends Dumpable {
 
     boolean isAutocommit();
 
-    default MycatConnection getConnection(String targetName) {
-        return getConnection(ImmutableList.of(targetName)).get(targetName).getFirst();
-    }
-
-    Map<String, Deque<MycatConnection>> getConnection(List<String> targetNames);
-
-    void reset();
+    MycatConnection getConnection(String targetName);
 
     public int getServerStatus();
 
@@ -78,4 +72,6 @@ public interface TransactionSession extends Dumpable {
     public void doAction();
 
     public void addCloseResource(AutoCloseable closeable);
+
+    String getTxId();
 }

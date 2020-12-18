@@ -16,16 +16,18 @@ package io.mycat.hbt4.executor;
 
 import com.google.common.collect.ImmutableMultimap;
 import io.mycat.MetaClusterCurrent;
+import io.mycat.MycatConnection;
 import io.mycat.MycatWorkerProcessor;
 import io.mycat.NameableExecutor;
-import io.mycat.api.collector.ComposeFutureRowBaseIterator;
+import io.mycat.api.collector.ComposeRowBaseIterator;
 import io.mycat.api.collector.RowBaseIterator;
 import io.mycat.calcite.MycatCalciteSupport;
 import io.mycat.calcite.resultset.CalciteRowMetaData;
 import io.mycat.calcite.resultset.MyCatResultSetEnumerator;
 import io.mycat.hbt3.View;
-import io.mycat.hbt4.DatasourceFactory;
+import io.mycat.hbt4.DataSourceFactory;
 import io.mycat.hbt4.Executor;
+import io.mycat.hbt4.ExplainWriter;
 import io.mycat.mpp.Row;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
@@ -40,7 +42,6 @@ import java.sql.Connection;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.mycat.hbt4.executor.MycatPreparedStatementUtil.executeQuery;
@@ -52,19 +53,19 @@ public class MycatLookupExecutor implements Executor {
 
     private final View view;
     private final CalciteRowMetaData metaData;
-    private DatasourceFactory factory;
+    private DataSourceFactory factory;
     private List<Object> params;
     private MyCatResultSetEnumerator myCatResultSetEnumerator = null;
-    private List<Connection> tmpConnections;
+    private List<MycatConnection> tmpConnections;
 
-    public MycatLookupExecutor(View view, DatasourceFactory factory, List<Object> params) {
+    public MycatLookupExecutor(View view, DataSourceFactory factory, List<Object> params) {
         this.view = view;
         this.factory = factory;
         this.params = params;
         this.metaData = new CalciteRowMetaData(this.view.getRowType().getFieldList());
     }
 
-    public static MycatLookupExecutor create(View view, DatasourceFactory factory, List<Object> params) {
+    public static MycatLookupExecutor create(View view, DataSourceFactory factory, List<Object> params) {
         return new MycatLookupExecutor(view, factory, params);
     }
 
@@ -98,18 +99,18 @@ public class MycatLookupExecutor implements Executor {
 
         MycatWorkerProcessor instance = MetaClusterCurrent.wrapper(MycatWorkerProcessor.class);
         NameableExecutor mycatWorker = instance.getMycatWorker();
-        LinkedList<Future<RowBaseIterator>> futureArrayList = new LinkedList<>();
+        LinkedList<RowBaseIterator> futureArrayList = new LinkedList<>();
         this.tmpConnections = factory.getTmpConnections(expandToSqls.keys().asList());
         int i = 0;
         for (Map.Entry<String, SqlString> entry : expandToSqls.entries()) {
-            Connection connection = tmpConnections.get(i);
+            MycatConnection connection = tmpConnections.get(i);
             String target = entry.getKey();
             SqlString sql = entry.getValue();
-            futureArrayList.add(mycatWorker.submit(() -> executeQuery(connection, metaData, sql, params)));
+            futureArrayList.add(executeQuery(connection.unwrap(Connection.class), connection, metaData, sql, params));
             i++;
         }
         AtomicBoolean flag = new AtomicBoolean();
-        ComposeFutureRowBaseIterator composeFutureRowBaseIterator = new ComposeFutureRowBaseIterator(metaData, futureArrayList);
+        ComposeRowBaseIterator composeFutureRowBaseIterator = new ComposeRowBaseIterator(metaData, futureArrayList);
         this.myCatResultSetEnumerator = new MyCatResultSetEnumerator(flag, composeFutureRowBaseIterator);
     }
 
@@ -140,5 +141,14 @@ public class MycatLookupExecutor implements Executor {
     @Override
     public boolean isRewindSupported() {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ExplainWriter explain(ExplainWriter writer) {
+        ExplainWriter explainWriter = writer.name(this.getClass().getName())
+                .into();
+        view.explain(writer);
+        explainWriter.item("params",params);
+        return explainWriter.ret();
     }
 }

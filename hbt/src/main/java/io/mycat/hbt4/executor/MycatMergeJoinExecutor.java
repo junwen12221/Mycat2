@@ -17,6 +17,7 @@ package io.mycat.hbt4.executor;
 import com.google.common.collect.ImmutableList;
 import io.mycat.calcite.MycatCalciteSupport;
 import io.mycat.hbt4.Executor;
+import io.mycat.hbt4.ExplainWriter;
 import org.apache.calcite.MycatContext;
 import io.mycat.hbt4.MycatRexCompiler;
 import io.mycat.mpp.Row;
@@ -33,6 +34,8 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.objenesis.instantiator.util.UnsafeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Iterator;
 import java.util.List;
@@ -50,6 +53,7 @@ public class MycatMergeJoinExecutor implements Executor {
     private List<Object> params;
     private Enumerable<Row> rows;
     private Iterator<Row> iterator;
+    private static final Logger LOGGER = LoggerFactory.getLogger(MycatMergeJoinExecutor.class);
 
     protected MycatMergeJoinExecutor(JoinRelType joinType,
                                      Executor outer,
@@ -71,6 +75,10 @@ public class MycatMergeJoinExecutor implements Executor {
         this.rightFieldCount = rightFieldCount;
         this.resultRelDataType = resultRelDataType;
         this.params = params;
+
+        if(LOGGER.isDebugEnabled()){
+            LOGGER.debug("create MycatMergeJoinExecutor ");
+        }
     }
     public static MycatMergeJoinExecutor create(
             JoinRelType joinType,
@@ -100,7 +108,7 @@ public class MycatMergeJoinExecutor implements Executor {
         if (rows == null) {
             outer.open();
             inner.open();
-            MycatContext o = (MycatContext) UnsafeUtils.getUnsafe().allocateInstance(MycatContext.class);
+            MycatContext o = new MycatContext();
             Enumerable<Row> outerEnumerate = Linq4j.asEnumerable(outer);
             Enumerable<Row> innerEnumerate = Linq4j.asEnumerable(inner);
             final Function1<Row, Row> outerKeySelector = a0 -> {
@@ -163,5 +171,13 @@ public class MycatMergeJoinExecutor implements Executor {
         return false;
     }
 
-
+    @Override
+    public ExplainWriter explain(ExplainWriter writer) {
+        ExplainWriter explainWriter = writer.name(this.getClass().getName())
+                .into();
+        explainWriter.item("joinType",joinType);
+        outer.explain(explainWriter);
+        inner.explain(explainWriter);
+        return explainWriter.ret();
+    }
 }

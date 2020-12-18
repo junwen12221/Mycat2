@@ -1,17 +1,24 @@
 package io.mycat.sqlhandler.dql;
 
+import com.alibaba.fastsql.sql.SQLUtils;
 import com.alibaba.fastsql.sql.ast.SQLCommentHint;
-import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlCreateTableStatement;
+import com.alibaba.fastsql.sql.ast.SQLStatement;
 import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlHintStatement;
 import io.mycat.*;
 import io.mycat.beans.MySQLDatasource;
 import io.mycat.beans.mycat.ResultSetBuilder;
 import io.mycat.beans.mysql.MySQLAutoCommit;
+import io.mycat.beans.mysql.MySQLErrorCode;
+import io.mycat.commands.MycatdbCommand;
 import io.mycat.config.*;
 import io.mycat.datasource.jdbc.datasource.JdbcConnectionManager;
 import io.mycat.datasource.jdbc.datasource.JdbcDataSource;
-import io.mycat.metadata.MetadataManager;
-import io.mycat.metadata.SchemaHandler;
+import io.mycat.hbt4.DataSourceFactory;
+import io.mycat.hbt4.DefaultDatasourceFactory;
+import io.mycat.hbt4.ResponseExecutorImplementor;
+import io.mycat.hbt4.executor.TempResultSetFactory;
+import io.mycat.hbt4.executor.TempResultSetFactoryImpl;
+import io.mycat.metadata.*;
 import io.mycat.proxy.reactor.MycatReactorThread;
 import io.mycat.proxy.reactor.ReactorThreadManager;
 import io.mycat.proxy.session.MySQLClientSession;
@@ -25,18 +32,18 @@ import io.mycat.replica.ReplicaSwitchType;
 import io.mycat.replica.heartbeat.DatasourceStatus;
 import io.mycat.replica.heartbeat.HeartBeatStatus;
 import io.mycat.replica.heartbeat.HeartbeatFlow;
-import io.mycat.sqlhandler.*;
-import io.mycat.sqlhandler.ddl.CreateTableSQLHandler;
+import io.mycat.sqlhandler.AbstractSQLHandler;
+import io.mycat.sqlhandler.ConfigUpdater;
+import io.mycat.sqlhandler.SQLRequest;
+import io.mycat.sqlhandler.SqlHints;
+import io.mycat.sqlhandler.dml.DrdsRunners;
 import io.mycat.util.JsonUtil;
+import io.mycat.util.NameMap;
 import io.mycat.util.Response;
-import oshi.demo.Json;
 
 import java.sql.JDBCType;
 import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.stream.Collectors;
@@ -69,9 +76,113 @@ public class HintHandler extends AbstractSQLHandler<MySqlHintStatement> {
                 JdbcConnectionManager jdbcConnectionManager = MetaClusterCurrent.wrapper(JdbcConnectionManager.class);
                 MycatServer mycatServer = MetaClusterCurrent.wrapper(MycatServer.class);
 
+                if ("setUserDialect".equalsIgnoreCase(cmd)) {
+                    MycatRouterConfigOps ops = ConfigUpdater.getOps();
+                    Authenticator authenticator = MetaClusterCurrent.wrapper(Authenticator.class);
+                    Map map = JsonUtil.from(body, Map.class);
+                    String username = (String)map.get("username");
+                    String dbType = (String)map.get("dialect");
+                    UserConfig userInfo = authenticator.getUserInfo(username);
+                    if (userInfo == null){
+                        response.sendError("unknown username:"+username, MySQLErrorCode.ER_UNKNOWN_ERROR);
+                        return;
+                    }
+                    userInfo.setDialect(dbType);
+                    ops.putUser(userInfo);
+                    ops.commit();
+                    response.sendOk();
+                    return;
+                }
+                if ("showDataNodes".equalsIgnoreCase(cmd)) {
+                    Map map = JsonUtil.from(body, Map.class);
+                    TableHandler table = metadataManager.getTable((String) map.get("schemaName"),
+                            (String) map.get("tableName"));
+                    LogicTableType type = table.getType();
+                    List<DataNode> backends = null;
+                    switch (type) {
+                        case SHARDING:
+                            backends  = ((ShardingTable) table).getBackends();
+                            break;
+                        case GLOBAL:
+                            backends  = ((GlobalTable) table).getGlobalDataNode();
+                            break;
+                        case NORMAL:
+                            backends  = Collections.singletonList(
+                                    ((NormalTable) table).getDataNode());
+                            break;
+                        case CUSTOM:
+                            throw new UnsupportedOperationException("unsupport custom table");
+                    }
+                    ResultSetBuilder resultSetBuilder = ResultSetBuilder.create();
+                    resultSetBuilder.addColumnInfo("targetName",JDBCType.VARCHAR);
+                    resultSetBuilder.addColumnInfo("schemaName",JDBCType.VARCHAR);
+                    resultSetBuilder.addColumnInfo("tableName",JDBCType.VARCHAR);
+
+                    for (DataNode dataNode : backends) {
+                        String targetName = dataNode.getTargetName();
+                        String schemaName = dataNode.getSchema();
+                        String tableName = dataNode.getTable();
+
+                        resultSetBuilder.addObjectRowPayload(
+                                Arrays.asList(targetName,schemaName,tableName));
+                    }
+                    response.sendResultSet(resultSetBuilder.build());
+                    return;
+                }
                 if ("resetConfig".equalsIgnoreCase(cmd)) {
                     MycatRouterConfigOps ops = ConfigUpdater.getOps();
                     ops.reset();
+                    ops.commit();
+                    response.sendOk();
+                    return;
+                }
+                if ("run".equalsIgnoreCase(cmd)) {
+                    Map<String,Object> map = JsonUtil.from(body, Map.class);
+                    String hbt = Objects.toString(map.get("hbt"));
+                    TempResultSetFactory tempResultSetFactory = new TempResultSetFactoryImpl();
+                    try (DataSourceFactory datasourceFactory = new DefaultDatasourceFactory(dataContext)) {
+                        DrdsRunners.runHbtOnDrds(dataContext, hbt,
+                                new ResponseExecutorImplementor(datasourceFactory, tempResultSetFactory, response));
+                    }
+                    return;
+                }
+                if ("createSqlCache".equalsIgnoreCase(cmd)) {
+                    MycatRouterConfigOps ops = ConfigUpdater.getOps();
+                    SQLStatement sqlStatement =null;
+                    if (ast.getHintStatements()!=null&&ast.getHintStatements().size() == 1){
+                        sqlStatement = ast.getHintStatements().get(0);
+                    }
+                    SqlCacheConfig sqlCacheConfig = JsonUtil.from(body, SqlCacheConfig.class);
+                    if (sqlCacheConfig.getSql() == null && sqlStatement != null) {
+                        sqlCacheConfig.setSql(sqlStatement.toString());
+                    }
+
+                    ops.putSqlCache(sqlCacheConfig);
+                    ops.commit();
+
+                    if (sqlStatement==null){
+                        String sql = sqlCacheConfig.getSql();
+                        sqlStatement = SQLUtils.parseSingleMysqlStatement(sql);
+                    }
+
+                    MycatdbCommand.execute(dataContext,response,sqlStatement);
+                    return;
+                }
+                if ("showSqlCaches".equalsIgnoreCase(cmd)) {
+                    ResultSetBuilder resultSetBuilder = ResultSetBuilder.create();
+                    resultSetBuilder.addColumnInfo("info",JDBCType.VARCHAR);
+                    if(MetaClusterCurrent.exist(SqlResultSetService.class)){
+                        SqlResultSetService sqlResultSetService = MetaClusterCurrent.wrapper(SqlResultSetService.class);
+                       sqlResultSetService.snapshot().toStringList()
+                               .forEach(c->resultSetBuilder.addObjectRowPayload(Arrays.asList(c)));
+                    }
+                    response.sendResultSet(resultSetBuilder.build());
+                    return;
+                }
+                if ("dropSqlCache".equalsIgnoreCase(cmd)) {
+                    MycatRouterConfigOps ops = ConfigUpdater.getOps();
+                    SqlCacheConfig sqlCacheConfig = JsonUtil.from(body, SqlCacheConfig.class);
+                    ops.removeSqlCache(sqlCacheConfig.getName());
                     ops.commit();
                     response.sendOk();
                     return;
@@ -89,13 +200,15 @@ public class HintHandler extends AbstractSQLHandler<MySqlHintStatement> {
                     builder.addColumnInfo("username", JDBCType.VARCHAR);
                     builder.addColumnInfo("ip", JDBCType.VARCHAR);
                     builder.addColumnInfo("transactionType", JDBCType.VARCHAR);
+                    builder.addColumnInfo("dbType", JDBCType.VARCHAR);
                     Authenticator authenticator = MetaClusterCurrent.wrapper(Authenticator.class);
                     List<UserConfig> userConfigs = authenticator.allUsers();
                     for (UserConfig userConfig : userConfigs) {
                         builder.addObjectRowPayload(Arrays.asList(
                                 userConfig.getUsername(),
                                 userConfig.getPassword(),
-                                userConfig.getTransactionType()
+                                userConfig.getTransactionType(),
+                                userConfig.getDialect()
                         ));
                     }
                     response.sendResultSet(() -> builder.build());
@@ -140,7 +253,7 @@ public class HintHandler extends AbstractSQLHandler<MySqlHintStatement> {
                         SchemaHandler schemaHandler = Objects.requireNonNull(
                                 metadataManager.getSchemaMap().get(schemaName)
                         );
-                        Map<String, TableHandler> logicTables = schemaHandler.logicTables();
+                        NameMap<TableHandler> logicTables = schemaHandler.logicTables();
                         tableHandlerStream = logicTables.values().stream();
                     }
                     if ("global".equalsIgnoreCase(type)) {
@@ -695,7 +808,7 @@ public class HintHandler extends AbstractSQLHandler<MySqlHintStatement> {
                     response.sendResultSet(() -> builder.build());
                     return;
                 }
-                mycatDmlHandler(cmd, body,ast);
+                mycatDmlHandler(cmd, body, ast);
                 response.sendOk();
                 return;
             }

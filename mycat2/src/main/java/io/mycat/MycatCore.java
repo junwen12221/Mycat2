@@ -7,14 +7,12 @@ import io.mycat.plug.loadBalance.LoadBalanceManager;
 import io.mycat.proxy.session.ProxyAuthenticator;
 import lombok.SneakyThrows;
 import org.apache.calcite.mycat.MycatBuiltInMethod;
-import org.apache.calcite.util.BuiltInMethod;
-import sun.util.calendar.ZoneInfo;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
-import java.util.Optional;
-import java.util.TimeZone;
+import java.util.function.BiFunction;
 
 /**
  * @author cjw
@@ -41,9 +39,17 @@ public class MycatCore {
             path = System.getProperty(configResourceKeyName);
         }
         if (path == null) {
-            path =  Paths.get(this.getClass().getProtectionDomain().getCodeSource().getLocation().toURI()).toString();;
+            Path bottom = Paths.get(this.getClass().getProtectionDomain().getCodeSource().getLocation().toURI());
+            while (!(Files.isDirectory(bottom) && Files.isWritable(bottom))){
+                bottom = bottom.getParent();
+            }
+            path = bottom.toString();
         }
-        this.baseDirectory = Paths.get(path).getParent().getParent().toAbsolutePath();
+        if (path == null){
+            throw new MycatException("can not find MYCAT_HOME");
+        }
+
+        this.baseDirectory = Paths.get(path).toAbsolutePath();
         System.out.println("path:" + this.baseDirectory);
         ServerConfiguration serverConfiguration = new ServerConfigurationImpl(MycatCore.class, path);
         MycatServerConfig serverConfig = serverConfiguration.serverConfig();
@@ -58,22 +64,32 @@ public class MycatCore {
         context.put(loadBalanceManager.getClass(), loadBalanceManager);
         context.put(mycatWorkerProcessor.getClass(), mycatWorkerProcessor);
         context.put(mycatServer.getClass(), mycatServer);
+        ////////////////////////////////////////////tmp///////////////////////////////////
+        BiFunction<String,String,Class> metaDataService = (tableName, columnName)->{
+            if("id".equals(columnName)){
+                return Integer.class;
+            }
+            return String.class;
+        };
+       // MapDBGSIService gsiService = new MapDBGSIService("gsi", metaDataService);
+//        context.put(GSIService.class,null);
         MetaClusterCurrent.register(context);
 
-        String mode = Optional.ofNullable(serverConfig.getMode()).orElse(PROPERTY_MODE_LOCAL).toLowerCase();
+        String mode = PROPERTY_MODE_LOCAL;
         switch (mode) {
             case PROPERTY_MODE_LOCAL: {
                 metadataStorageManager = new FileMetadataStorageManager(serverConfig,datasourceProvider, this.baseDirectory);
                 break;
             }
             case PROPERTY_MODE_CLUSTER:
-                String zkAddress = System.getProperty("zkAddress");
+                String zkAddress =System.getProperty("zk_address");
                 if (zkAddress != null) {
-                    ZKStore zkStore = new ZKStore("mycat", zkAddress);
                     metadataStorageManager =
-                            new CoordinatorMetadataStorageManager(serverConfig,zkStore,
-                                    ConfigReaderWriter.getReaderWriterBySuffix("json"),
-                                    datasourceProvider);
+                            new CoordinatorMetadataStorageManager(
+                                    new FileMetadataStorageManager(serverConfig,
+                                            datasourceProvider,
+                                            this.baseDirectory),
+                                    zkAddress);
                     break;
                 }
             default: {

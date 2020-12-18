@@ -14,6 +14,7 @@ import io.mycat.hbt4.executor.TempResultSetFactory;
 import io.mycat.hbt4.executor.TempResultSetFactoryImpl;
 import io.mycat.util.Explains;
 import io.mycat.util.Response;
+import lombok.SneakyThrows;
 import org.apache.calcite.linq4j.Linq4j;
 import org.apache.calcite.rel.type.RelDataType;
 
@@ -25,7 +26,7 @@ import java.util.Objects;
 public class ResponseExecutorImplementor extends ExecutorImplementorImpl implements ExecutorImplementor {
     protected final Response response;
 
-    public static ResponseExecutorImplementor create(MycatDataContext context, Response response,DatasourceFactory datasourceFactory) {
+    public static ResponseExecutorImplementor create(MycatDataContext context, Response response, DataSourceFactory datasourceFactory) {
         TempResultSetFactory tempResultSetFactory = new TempResultSetFactoryImpl();
         TransactionType transactionType = context.getTransactionSession().transactionType();
         switch (transactionType) {
@@ -39,13 +40,14 @@ public class ResponseExecutorImplementor extends ExecutorImplementorImpl impleme
     }
 
     public ResponseExecutorImplementor(
-            DatasourceFactory factory,
+            DataSourceFactory factory,
             TempResultSetFactory tempResultSetFactory,
             Response response) {
         super(factory, tempResultSetFactory);
         this.response = response;
     }
 
+    @SneakyThrows
     @Override
     public void implementRoot(MycatRel rel, List<String> aliasList) {
         Objects.requireNonNull(rel);
@@ -55,11 +57,13 @@ public class ResponseExecutorImplementor extends ExecutorImplementorImpl impleme
         try {
             if (executor instanceof MycatInsertExecutor) {
                 MycatInsertExecutor insertExecutor = (MycatInsertExecutor) executor;
+                factory.open();
                 runInsert(insertExecutor);
                 return;
             }
             if (executor instanceof MycatUpdateExecutor) {
                 MycatUpdateExecutor updateExecutor = (MycatUpdateExecutor) executor;
+                factory.open();
                 runUpdate(updateExecutor);
                 return;
             }
@@ -69,6 +73,8 @@ public class ResponseExecutorImplementor extends ExecutorImplementorImpl impleme
                 executor.close();
             }
             response.sendError(e);
+        }finally {
+            factory.close();
         }
         return;
     }
@@ -105,8 +111,8 @@ public class ResponseExecutorImplementor extends ExecutorImplementorImpl impleme
 
     protected void runUpdate(MycatUpdateExecutor updateExecutor) {
         updateExecutor.open();
-        long affectedRow = updateExecutor.affectedRow;
-        long lastInsertId = updateExecutor.lastInsertId;
+        long affectedRow = updateExecutor.getAffectedRow();
+        long lastInsertId = updateExecutor.getLastInsertId();
         response.sendOk(lastInsertId, affectedRow);
     }
 

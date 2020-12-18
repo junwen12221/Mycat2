@@ -16,6 +16,7 @@ package io.mycat.hbt4.executor;
 
 
 import io.mycat.hbt4.Executor;
+import io.mycat.hbt4.ExplainWriter;
 import io.mycat.mpp.Row;
 import org.apache.calcite.linq4j.EnumerableDefaults;
 import org.apache.calcite.linq4j.JoinType;
@@ -23,6 +24,8 @@ import org.apache.calcite.linq4j.Linq4j;
 import org.apache.calcite.linq4j.function.Function2;
 import org.apache.calcite.linq4j.function.Predicate2;
 import org.apache.calcite.rel.core.JoinRelType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Iterator;
 
@@ -35,6 +38,7 @@ public class MycatNestedLoopJoinExecutor implements Executor {
     private final Predicate2<Row, Row> predicate;
     private TempResultSetFactory tempResultSetFactory;
     private Iterator<Row> iterator;
+    private static final Logger LOGGER = LoggerFactory.getLogger(MycatNestedLoopJoinExecutor.class);
 
     protected MycatNestedLoopJoinExecutor(
             JoinRelType joinType,
@@ -49,6 +53,10 @@ public class MycatNestedLoopJoinExecutor implements Executor {
         this.resultSelector = resultSelector;
         this.predicate = predicate;
         this.tempResultSetFactory = tempResultSetFactory;
+
+        if(LOGGER.isDebugEnabled()){
+            LOGGER.debug("create MycatNestedLoopJoinExecutor ");
+        }
     }
 
     public static MycatNestedLoopJoinExecutor create(
@@ -110,5 +118,15 @@ public class MycatNestedLoopJoinExecutor implements Executor {
     @Override
     public boolean isRewindSupported() {
         return leftSource.isRewindSupported();
+    }
+
+    @Override
+    public ExplainWriter explain(ExplainWriter writer) {
+        ExplainWriter explainWriter = writer.name(this.getClass().getName())
+                .into();
+        explainWriter.item("joinType",joinType);
+        leftSource.explain(writer);
+        originalRightSource.explain(writer);
+        return explainWriter.ret();
     }
 }
